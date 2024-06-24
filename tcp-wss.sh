@@ -1,5 +1,5 @@
 #!/bin/sh
-## blog: https://111111.online
+# forum: https://1024.day
 
 if [[ $EUID -ne 0 ]]; then
     clear
@@ -10,30 +10,54 @@ fi
 timedatectl set-timezone Asia/Shanghai
 v2path=$(cat /dev/urandom | head -1 | md5sum | head -c 6)
 v2uuid=$(cat /proc/sys/kernel/random/uuid)
+ssport=$(shuf -i 2000-65000 -n 1)
 
-install_v2ray(){
+getIP(){
+    local serverIP=
+    serverIP=$(curl -s -4 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
+    if [[ -z "${serverIP}" ]]; then
+        serverIP=$(curl -s -6 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
+    fi
+    echo "${serverIP}"
+}
+
+install_precheck(){
     echo "====输入已经DNS解析好的域名===="
     read domain
+
+    read -t 15 -p "回车或等待15秒为默认端口443，或者自定义端口请输入(1-65535)："  getPort
+    if [ -z $getPort ];then
+        getPort=443
+    fi
     
-    if [ -f "/usr/bin/apt-get" ];then
-            isDebian=`cat /etc/issue|grep Debian`
-            if [ "$isDebian" != "" ];then
-                    apt install -y nginx certbot
-                    systemctl stop nginx.service
-                    echo "A" | certbot certonly --renew-by-default --register-unsafely-without-email --standalone -d $domain
-                    sleep 3s
-            else
-                    apt install -y nginx certbot
-                    systemctl stop nginx.service
-                    echo "A" | certbot certonly --renew-by-default --register-unsafely-without-email --standalone -d $domain
-                    sleep 3s
-            fi
+    if [ -f "/usr/bin/apt-get" ]; then
+        apt-get update -y && apt-get upgrade -y
+        apt-get install -y net-tools curl
     else
-        yum install epel-release -y
-        yum install nginx certbot -y
-        systemctl stop nginx.service
-        echo "Y" | certbot certonly --renew-by-default --register-unsafely-without-email --standalone -d $domain
-        sleep 3s
+        yum update -y && yum upgrade -y
+        yum install -y epel-release
+        yum install -y net-tools curl
+    fi
+
+    sleep 3
+    isPort=`netstat -ntlp| grep -E ':80 |:443 '`
+    if [ "$isPort" != "" ];then
+        clear
+        echo " ================================================== "
+        echo " 80或443端口被占用，请先释放端口再运行此脚本"
+        echo
+        echo " 端口占用信息如下："
+        echo $isPort
+        echo " ================================================== "
+        exit 1
+    fi
+}
+
+install_nginx(){
+    if [ -f "/usr/bin/apt-get" ];then
+        apt-get install -y nginx cron socat
+    else
+        yum install -y nginx cronie socat
     fi
 
 cat >/etc/nginx/nginx.conf<<EOF
@@ -56,23 +80,20 @@ http {
     include /etc/nginx/mime.types;
     access_log off;
     error_log /dev/null;
+
     server {
-        listen 80;
-        listen [::]:80;
-        server_name $domain;
-        location / {
-            return 301 https://\$server_name\$request_uri;
-        }
-    }
-    server {
-        listen 443 ssl http2;
-        listen [::]:443 ssl http2;
+        listen $getPort ssl http2;
+        listen [::]:$getPort ssl http2;
         server_name $domain;
         ssl_protocols TLSv1.1 TLSv1.2 TLSv1.3;
         ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:HIGH:!aNULL:!MD5:!RC4:!DHE;
         ssl_prefer_server_ciphers on;
         ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
-        ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+        ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;        
+        location / {
+            default_type text/plain;
+            return 200 "Hello World !";
+        }        
         location /$v2path {
             proxy_redirect off;
             proxy_pass http://127.0.0.1:8080;
@@ -84,9 +105,17 @@ http {
     }
 }
 EOF
+}
 
-    wget https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh && bash install-release.sh
+acme_ssl(){    
+    curl https://get.acme.sh | sh -s email=my@example.com
+    mkdir -p /etc/letsencrypt/live/$domain
+    ~/.acme.sh/acme.sh --issue -d $domain --standalone --keylength ec-256 --pre-hook "systemctl stop nginx" --post-hook "~/.acme.sh/acme.sh --installcert -d $domain --ecc --fullchain-file /etc/letsencrypt/live/$domain/fullchain.pem --key-file /etc/letsencrypt/live/$domain/privkey.pem --reloadcmd \"systemctl start nginx\""
+}
 
+install_v2ray(){    
+    bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
+    
 cat >/usr/local/etc/v2ray/config.json<<EOF
 {
   "inbounds": [
@@ -117,145 +146,99 @@ cat >/usr/local/etc/v2ray/config.json<<EOF
 }
 EOF
 
-    systemctl enable nginx.service && systemctl start nginx.service
-    systemctl enable v2ray.service && systemctl start v2ray.service
+    systemctl enable v2ray.service && systemctl restart v2ray.service && systemctl restart nginx.service
     rm -f tcp-wss.sh install-release.sh
 
 cat >/usr/local/etc/v2ray/client.json<<EOF
 {
 ===========配置参数=============
+协议：VMess
 地址：${domain}
-端口：443/8080
+端口：${getPort}
 UUID：${v2uuid}
 加密方式：aes-128-gcm
 传输协议：ws
 路径：/${v2path}
 底层传输：tls
-注意：8080端口不需要打开tls
+注意：8080是免流端口不需要打开tls
 }
 EOF
 
     clear
-    echo
-    echo "安装已经完成"
-    echo
-    echo "===========配置参数============"
-    echo "地址：${domain}"
-    echo "端口：443/8080"
-    echo "UUID：${v2uuid}"
-    echo "加密方式：aes-128-gcm"
-    echo "传输协议：ws"
-    echo "路径：/${v2path}"
-    echo "底层传输：tls"
-    echo "注意：8080端口不需要打开tls"
-    echo
 }
 
-install_sslibev(){
-        if [ -f "/usr/bin/apt-get" ];then
-            isDebian=`cat /etc/issue|grep Debian`
-            if [ "$isDebian" != "" ];then
-                    apt install -y --no-install-recommends autoconf automake \
-                    debhelper pkg-config asciidoc xmlto libpcre3-dev apg pwgen rng-tools \
-                    libev-dev libc-ares-dev dh-autoreconf libsodium-dev libmbedtls-dev git
-                    sleep 3s
-            else
-                    apt install -y --no-install-recommends autoconf automake \
-                    debhelper pkg-config asciidoc xmlto libpcre3-dev apg pwgen rng-tools \
-                    libev-dev libc-ares-dev dh-autoreconf libsodium-dev libmbedtls-dev git
-                    sleep 3s
-            fi
-    else
-        yum install epel-release -y
-        yum install gcc gettext autoconf libtool automake make pcre-devel asciidoc xmlto c-ares-devel libev-devel libsodium-devel mbedtls-devel git -y  
-        sleep 3s
-    fi
-
-    git clone https://github.com/shadowsocks/shadowsocks-libev.git
-    cd shadowsocks-libev
-    git submodule update --init --recursive
-    ./autogen.sh && ./configure --prefix=/usr && make
-    make install
-    mkdir -p /etc/shadowsocks-libev
-
-cat >/etc/shadowsocks-libev/config.json<<EOF
-{
-    "server":["[::0]","0.0.0.0"],
-    "server_port":1024,
-    "password":"$v2uuid",
-    "timeout":600,
-    "method":"aes-256-gcm"
-}
-EOF
-
-cat >/etc/systemd/system/shadowsocks.service<<EOF
-[Unit]
-Description=Shadowsocks Server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/ss-server -c /etc/shadowsocks-libev/config.json
-Restart=on-abort
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload && systemctl enable shadowsocks.service && systemctl start shadowsocks.service
-    cd ..
-    rm -rf shadowsocks-libev tcp-wss.sh
-
-    clear
-    echo
-    echo "=========Shadowsocks配置参数========="
-    echo
-    cat /etc/shadowsocks-libev/config.json
+install_ssrust(){
+    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/ss-rust.sh && bash ss-rust.sh
 }
 
-config_proxy(){
-    clear
+install_reality(){
+    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/reality.sh && bash reality.sh
+}
+
+install_ws(){
+    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/ws.sh && bash ws.sh
+}
+
+install_hy2(){
+    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/hy2.sh && bash hy2.sh
+}
+
+client_v2ray(){
+    wslink=$(echo -n "{\"port\":${getPort},\"ps\":\"1024-wss\",\"tls\":\"tls\",\"id\":\"${v2uuid}\",\"aid\":0,\"v\":2,\"host\":\"${domain}\",\"type\":\"none\",\"path\":\"/${v2path}\",\"net\":\"ws\",\"add\":\"${domain}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${domain}\",\"sni\":\"${domain}\"}" | base64 -w 0)
+
     echo
     echo "安装已经完成"
     echo
     echo "===========v2ray配置参数============"
+    echo "协议：VMess"
     echo "地址：${domain}"
-    echo "端口：443/8080"
+    echo "端口：${getPort}"
     echo "UUID：${v2uuid}"
     echo "加密方式：aes-128-gcm"
     echo "传输协议：ws"
     echo "路径：/${v2path}"
     echo "底层传输：tls"
-    echo "注意：8080端口不需要打开tls"
+    echo "注意：8080是免流端口不需要打开tls"
+    echo "===================================="
+    echo "vmess://${wslink}"
     echo
-    echo "=========Shadowsocks配置参数========="
-    echo
-    cat /etc/shadowsocks-libev/config.json
 }
 
 start_menu(){
     clear
     echo " ================================================== "
-    echo " 介绍：一键安装Shadowsocks-libev和v2ray+ws+tls代理    "
+    echo " 论坛：https://1024.day                              "
+    echo " 介绍：一键安装SS-Rust，v2ray+wss，Reality和hy2代理    "
     echo " 系统：Ubuntu、Debian、CentOS                        "
     echo " ================================================== "
     echo
-    echo " 1. 安装Shadowsocks-libev"
-    echo " 2. 安装v2ray+ws+tls"
-    echo " 3. 同时安装上述两种代理"
+    echo " 1. 安装 Shadowsocks-rust"
+    echo " 2. 安装 v2ray+ws+tls"
+    echo " 3. 安装 Reality"
+    echo " 4. 安装 v2ray+ws"
+    echo " 5. 安装 Hysteria2"
     echo " 0. 退出脚本"
     echo
     read -p "请输入数字:" num
     case "$num" in
     1)
-    install_sslibev
+    install_ssrust
     ;;
     2)
-    install_v2ray  
+    install_precheck
+    install_nginx
+    acme_ssl
+    install_v2ray
+    client_v2ray
     ;;
     3)
-    install_v2ray
-    install_sslibev
-    config_proxy
+    install_reality
+    ;;
+    4)
+    install_ws
+    ;;
+    5)
+    install_hy2
     ;;
     0)
     exit 1
